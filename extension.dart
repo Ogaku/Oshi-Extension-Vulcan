@@ -1,4 +1,4 @@
-﻿// @id PROVGUID-RGLR-PROV-VULC-EDUVULCANAPI
+// @id PROVGUID-RGLR-PROV-VULC-EDUVULCANAPI
 // @name eduVULCAN / UONET+
 // @version 1.1.0
 // @lang pl
@@ -101,5 +101,4 @@ class EduVulcanExtension extends OProvider {
 EduVulcanExtension main(dynamic source) {
   return EduVulcanExtension(source: source as OSource);
 }
-
 
