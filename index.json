@@ -1,0 +1,44 @@
+[
+  {
+    "id": "PROVGUID-RGLR-PROV-VULC-EDUVULCANAPI",
+    "name": "eduVULCAN / UONET+",
+    "description": "/Providers/Vulcan/Description",
+    "version": "1.2.1",
+    "lang": "pl",
+    "author": "Ogaku",
+    "iconUrl": "https://eduvulcan.pl/Content/images/favicon/apple-touch-icon.png",
+    "bannerUrl": "https://eduvulcan.pl/Content/images/favicon/apple-touch-icon.png",
+    "baseUrl": "https://lekcjaplus.vulcan.net.pl",
+    "sourceCodeUrl": "https://raw.githubusercontent.com/Ogaku/Oshi-Extension-Vulcan/main/extension.dart",
+    "repoUrl": "https://github.com/Ogaku/Oshi-Extension-Vulcan",
+    "sha256": "5483494d7515eac908b192a2f98343dbbf09f0a00426df52e4c020904590a09d",
+    "minAppVersion": "1.1.0",
+    "loginType": 20,
+    "isDevOnly": false,
+    "credentials": [
+      {
+        "key": "login",
+        "name": "/Session/Login/Username",
+        "obscure": false,
+        "optional": false,
+        "webOnly": false
+      },
+      {
+        "key": "pass",
+        "name": "/Session/Login/Password",
+        "obscure": true,
+        "optional": false,
+        "webOnly": false
+      },
+      {
+        "key": "proxy",
+        "name": "/Session/Login/ProxyUrl",
+        "obscure": false,
+        "optional": true,
+        "webOnly": true,
+        "helperText": "/Session/Login/ProxyHelper",
+        "helperUrl": "https://github.com/Ogaku/Oshi/wiki/Web-app"
+      }
+    ]
+  }
+]
