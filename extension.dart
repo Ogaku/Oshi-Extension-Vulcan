@@ -1,6 +1,6 @@
 // @id PROVGUID-RGLR-PROV-VULC-EDUVULCANAPI
 // @name eduVULCAN / UONET+
-// @version 1.2.1
+// @version 1.2.2
 // @lang pl
 // @author Ogaku
 // @icon https://eduvulcan.pl/Content/images/favicon/apple-touch-icon.png
@@ -374,20 +374,68 @@ class EduVulcanExtension extends OProvider {
     return _tryParseVulcanDate(value) ?? fallback ?? DateTime.now();
   }
 
-  Map<String, dynamic> _teacherToJson(dynamic raw) {
+  String _cleanPersonName(String rawName) {
+    var cleaned = rawName.trim();
+    if (cleaned.isEmpty) return '';
+    if (cleaned.contains(' - ')) {
+      cleaned = cleaned.split(' - ').first.trim();
+    }
+    cleaned = cleaned.replaceAll(RegExp(r'\s*\[[^\]]*\]\s*$'), '').trim();
+    return cleaned;
+  }
+
+  Map<String, String> _splitPersonName(String rawName) {
+    final cleaned = _cleanPersonName(rawName);
+    if (cleaned.isEmpty) {
+      return const {'firstName': '', 'lastName': ''};
+    }
+    final parts = cleaned.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    if (parts.length == 1) {
+      return {'firstName': '', 'lastName': parts.first};
+    }
+    return {
+      'firstName': parts.first,
+      'lastName': parts.sublist(1).join(' '),
+    };
+  }
+
+  bool _hasTeacherName(Map<String, dynamic>? teacher) {
+    if (teacher == null) return false;
+    return _str(teacher['firstName']).trim().isNotEmpty ||
+        _str(teacher['lastName']).trim().isNotEmpty;
+  }
+
+  Map<String, dynamic> _teacherToJson(dynamic raw, {bool? isHomeTeacher}) {
     if (raw is! Map) {
       return <String, dynamic>{
         'id': -1,
         'url': '',
         'firstName': '',
         'lastName': '',
+        if (isHomeTeacher != null) 'isHomeTeacher': isHomeTeacher,
       };
+    }
+    var firstName = _str(raw['FirstName'] ?? raw['Name']).trim();
+    var lastName = _str(raw['Surname'] ?? raw['LastName']).trim();
+    final display = _str(raw['DisplayName']).trim();
+    if (firstName.isEmpty && lastName.isEmpty && display.isNotEmpty) {
+      final split = _splitPersonName(display);
+      firstName = split['firstName'] ?? '';
+      lastName = split['lastName'] ?? '';
+    } else if (lastName.isEmpty && firstName.contains(' ')) {
+      final split = _splitPersonName(firstName);
+      firstName = split['firstName'] ?? '';
+      lastName = split['lastName'] ?? '';
+    } else {
+      if (firstName.isNotEmpty) firstName = _cleanPersonName(firstName);
+      if (lastName.isNotEmpty) lastName = _cleanPersonName(lastName);
     }
     return <String, dynamic>{
       'id': _int(raw['Id']),
-      'url': '',
-      'firstName': _str(raw['Name']),
-      'lastName': _str(raw['Surname'] ?? raw['DisplayName']),
+      'url': _str(raw['BoxId'] ?? raw['AddressHash'] ?? raw['GlobalKey']),
+      'firstName': firstName,
+      'lastName': lastName,
+      if (isHomeTeacher != null) 'isHomeTeacher': isHomeTeacher,
     };
   }
 
@@ -1302,18 +1350,259 @@ class EduVulcanExtension extends OProvider {
         }
       } catch (_) {}
 
+      var homeTeacherJson = _teacherToJson(null, isHomeTeacher: true);
+      var principalName = '';
+      var principalIsVice = false;
+      void setPrincipal(String rawCandidate, {bool isVice = false}) {
+        final cleaned = _cleanPersonName(rawCandidate);
+        if (cleaned.isEmpty) return;
+        if (!isVice) {
+          principalName = cleaned;
+          principalIsVice = false;
+        } else if (principalName.isEmpty || principalIsVice) {
+          principalName = cleaned;
+          principalIsVice = true;
+        }
+      }
+
+      final educatorsListRaw = studentRaw['EducatorsList'];
+      if (educatorsListRaw is List) {
+        for (final e in educatorsListRaw) {
+          if (e is! Map) continue;
+          final group = _str(e['Group']).toLowerCase();
+          final rawName = _str(e['Name'] ?? e['DisplayName']);
+          if (group.contains('dyrektor')) {
+            setPrincipal(rawName, isVice: group.contains('wicedyrektor'));
+          } else if (!_hasTeacherName(homeTeacherJson)) {
+            final candidate = _teacherToJson(e, isHomeTeacher: true);
+            if (_hasTeacherName(candidate)) {
+              homeTeacherJson = candidate;
+            }
+          }
+        }
+      }
+
+      final educatorsRaw = studentRaw['Educators'];
+      if (educatorsRaw is List) {
+        for (final e in educatorsRaw) {
+          if (e is! Map) continue;
+          final roles = e['Roles'];
+          var roleMatchedHome = false;
+          if (roles is List && roles.isNotEmpty) {
+            for (final r in roles) {
+              if (r is! Map) continue;
+              final roleName = _str(r['RoleName']).toLowerCase();
+              final roleTeacher = _hasTeacherName(_teacherToJson(e))
+                  ? e
+                  : <String, dynamic>{
+                      'Id': e['Id'],
+                      'Name': r['Name'] ?? e['Name'],
+                      'Surname': r['Surname'] ?? e['Surname'],
+                      'DisplayName': r['DisplayName'] ?? e['DisplayName'],
+                      'AddressHash': r['AddressHash'] ?? e['AddressHash'],
+                    };
+              final personName = _str(roleTeacher['DisplayName']).trim().isNotEmpty
+                  ? _str(roleTeacher['DisplayName']).trim()
+                  : '${_str(roleTeacher['Name'])} ${_str(roleTeacher['Surname'])}'.trim();
+              if (roleName.contains('dyrektor')) {
+                setPrincipal(personName, isVice: roleName.contains('wicedyrektor'));
+              } else if (roleName.contains('wychowawc') || _int(r['RoleOrder']) == 1) {
+                roleMatchedHome = true;
+                final candidate = _teacherToJson(roleTeacher, isHomeTeacher: true);
+                if (_hasTeacherName(candidate)) {
+                  homeTeacherJson = candidate;
+                }
+              }
+            }
+          }
+          if (!roleMatchedHome && !_hasTeacherName(homeTeacherJson)) {
+            final candidate = _teacherToJson(e, isHomeTeacher: true);
+            if (_hasTeacherName(candidate)) {
+              homeTeacherJson = candidate;
+            }
+          }
+        }
+      }
+
+      final subjectTeachersByName = <String, Map<String, dynamic>>{};
+      final teacherPeriodId = _int(currentPeriod?['Id'], periodId);
+      if (teacherPeriodId != -1) {
+        try {
+          final teachersEnv = await _hebeRequest(
+            method: 'GET',
+            restUrl: _restUrl!,
+            endpoint: 'mobile/teacher/byPeriod',
+            pupilId: pupilId,
+            query: {
+              'periodId': teacherPeriodId.toString(),
+              'pupilId': pupilId.toString(),
+              'unitId': unitId.toString(),
+              'lastId': '-2147483648',
+              'pageSize': '500',
+              'lastSyncDate': '1970-01-01 01:00:00',
+            },
+          );
+          if (teachersEnv is List) {
+            for (final t in teachersEnv) {
+              if (t is! Map) continue;
+              final pos = _intOrNull(t['Position']);
+              final desc = _str(t['Description']).trim();
+              final descLower = desc.toLowerCase();
+              final first = _cleanPersonName(_str(t['FirstName'] ?? t['Name']));
+              final last = _cleanPersonName(_str(t['Surname'] ?? t['LastName']));
+              final full = '$first $last'.trim();
+              final display = _cleanPersonName(_str(t['DisplayName']));
+              final bestName = full.isNotEmpty ? full : display;
+
+              if (pos == 0 || descLower.contains('wychowawca')) {
+                final candidate = _teacherToJson(t, isHomeTeacher: true);
+                if (_hasTeacherName(candidate) &&
+                    (descLower.contains('wychowawca') || !_hasTeacherName(homeTeacherJson))) {
+                  homeTeacherJson = candidate;
+                }
+              }
+              if (pos == 2 || descLower.contains('dyrektor')) {
+                setPrincipal(bestName, isVice: descLower.contains('wicedyrektor'));
+              }
+              if (descLower.isNotEmpty &&
+                  pos != 0 &&
+                  pos != 2 &&
+                  !descLower.contains('wychowawca') &&
+                  !descLower.contains('dyrektor')) {
+                final subjectTeacher = _teacherToJson(t);
+                if (_hasTeacherName(subjectTeacher)) {
+                  subjectTeachersByName.putIfAbsent(descLower, () => subjectTeacher);
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (!_hasTeacherName(homeTeacherJson)) {
+        try {
+          final kgEnv = await _hebeRequest(
+            method: 'GET',
+            restUrl: _restUrl!,
+            endpoint: 'mobile/teacher/kindergarten/byPupil',
+            pupilId: pupilId,
+            query: {
+              'pupilId': pupilId.toString(),
+              'unitId': unitId.toString(),
+              'lastId': '-2147483648',
+              'pageSize': '500',
+              'lastSyncDate': '1970-01-01 01:00:00',
+            },
+          );
+          if (kgEnv is List) {
+            for (final t in kgEnv) {
+              if (t is! Map) continue;
+              final candidate = _teacherToJson(t, isHomeTeacher: true);
+              if (_hasTeacherName(candidate)) {
+                homeTeacherJson = candidate;
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      final rawConstituentName = _str(constituentRaw['Name']).trim();
+      final rawUnitName = _str(unitRaw['Name']).trim();
+      final rawDisplayName = _str(unitRaw['DisplayName']).trim();
+      final patron = _str(constituentRaw['Patron'] ?? unitRaw['Patron']).trim();
+      var unitFullName = rawConstituentName.isNotEmpty
+          ? rawConstituentName
+          : (rawUnitName.isNotEmpty
+              ? rawUnitName
+              : (rawDisplayName.isNotEmpty ? rawDisplayName : 'Szko\u0142a VULCAN'));
+      if (patron.isNotEmpty && !unitFullName.toLowerCase().contains(patron.toLowerCase())) {
+        unitFullName = '$unitFullName im. $patron';
+      }
       final unitName = _str(
-        unitRaw['Short'],
-        _str(unitRaw['DisplayName'], 'VULCAN'),
+        unitRaw['DisplayName'],
+        unitFullName.isNotEmpty ? unitFullName : _str(unitRaw['Short'], 'VULCAN'),
       );
-      final unitFullName = _str(
-        unitRaw['Name'],
-        _str(constituentRaw['Name'], 'Szko\u0142a VULCAN'),
-      );
-      final unitAddress = _str(
+      var unitAddress = _str(
         unitRaw['Address'],
         _str(constituentRaw['Address']),
       );
+      var unitTown = _str(
+        constituentRaw['City'] ?? constituentRaw['Town'],
+        _str(unitRaw['City'] ?? unitRaw['Town']),
+      );
+      var unitPhone = _str(
+        constituentRaw['Phone'] ?? constituentRaw['Telephone'],
+        _str(unitRaw['Phone'] ?? unitRaw['Telephone']),
+      );
+      var unitEmail = _str(
+        constituentRaw['Email'] ?? constituentRaw['Mail'],
+        _str(unitRaw['Email'] ?? unitRaw['Mail']),
+      );
+      if (principalName.isEmpty) {
+        setPrincipal(_str(
+          constituentRaw['Director'] ?? constituentRaw['Principal'],
+          _str(unitRaw['Director'] ?? unitRaw['Principal']),
+        ));
+      }
+
+      try {
+        final infoEnv = await _hebeRequest(
+          method: 'GET',
+          restUrl: _restUrl!,
+          endpoint: 'mobile/school/info',
+          pupilId: pupilId,
+          query: {
+            'pupilId': pupilId.toString(),
+            'lastSyncDate': '1970-01-01 01:00:00',
+          },
+        );
+        if (infoEnv is List) {
+          for (final item in infoEnv) {
+            if (item is! Map) continue;
+            final topic = _str(item['Topic']).trim().toLowerCase();
+            final content = _str(item['Content'])
+                .replaceAll(RegExp(r'<[^>]*>'), ' ')
+                .replaceAll('&nbsp;', ' ')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            if (content.isEmpty) continue;
+            if (topic.contains('dyrektor')) {
+              setPrincipal(content, isVice: topic.contains('wicedyrektor'));
+            }
+            if (unitEmail.isEmpty) {
+              final emailMatch = RegExp(
+                r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}',
+              ).firstMatch(content);
+              if (emailMatch != null) {
+                unitEmail = emailMatch.group(0) ?? '';
+              }
+            }
+            if (unitPhone.isEmpty &&
+                (topic.contains('tel') ||
+                    topic.contains('phone') ||
+                    topic.contains('kontakt') ||
+                    topic.contains('dane'))) {
+              final phoneMatch = RegExp(r'(\+?\d[\d\s\-()]{6,}\d)').firstMatch(content);
+              if (phoneMatch != null) {
+                unitPhone = (phoneMatch.group(1) ?? '').trim();
+              } else if (topic.contains('telefon') && content.length <= 40) {
+                unitPhone = content;
+              }
+            }
+            if (unitAddress.isEmpty && (topic.contains('adres') || topic.contains('address'))) {
+              unitAddress = content;
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (unitTown.isEmpty && unitAddress.isNotEmpty) {
+        final townMatch = RegExp(r'\b\d{2}-\d{3}\s+([^,\n]+)').firstMatch(unitAddress);
+        if (townMatch != null) {
+          unitTown = (townMatch.group(1) ?? '').trim();
+        }
+      }
 
       final unitJson = <String, dynamic>{
         'id': unitId,
@@ -1323,6 +1612,10 @@ class EduVulcanExtension extends OProvider {
         'name': unitName.isNotEmpty ? unitName : 'VULCAN',
         'fullName': unitFullName.isNotEmpty ? unitFullName : 'Szko\u0142a VULCAN',
         'address': unitAddress,
+        'town': unitTown,
+        'principalName': principalName,
+        'phone': unitPhone,
+        'email': unitEmail,
         'lessonsRange': lessonRangesJson,
         'announcements': announcementsJson,
       };
@@ -1337,6 +1630,7 @@ class EduVulcanExtension extends OProvider {
         'endFirstSemester': endFirstSemester.toIso8601String(),
         'endSchoolYear': endSchoolYear.toIso8601String(),
         'unit': unitJson,
+        'classTutor': homeTeacherJson,
         'events': <Map<String, dynamic>>[],
         'averages': <String, dynamic>{},
       };
@@ -1363,21 +1657,30 @@ class EduVulcanExtension extends OProvider {
           );
         }
         final id = _int(rawSub['Id']);
-        return subjectsById.putIfAbsent(
+        final subName = _str(rawSub['Name'], 'Przedmiot');
+        final candidateTeacher = _hasTeacherName(fallbackTeacher)
+            ? fallbackTeacher!
+            : (subjectTeachersByName[subName.toLowerCase().trim()] ?? _teacherToJson(null));
+        final subject = subjectsById.putIfAbsent(
           id,
           () => {
             'id': id,
             'url': '',
-            'name': _str(rawSub['Name'], 'Przedmiot'),
+            'name': subName,
             'short': _str(rawSub['Kod'] ?? rawSub['Code']),
             'no': _int(rawSub['Position'], id),
             'isExtracurricular': false,
             'isBlockLesson': false,
             'hostClass': mainClassLightJson,
-            'teacher': fallbackTeacher ?? _teacherToJson(null),
+            'teacher': candidateTeacher,
             'grades': <Map<String, dynamic>>[],
           },
         );
+        if (!_hasTeacherName(subject['teacher'] as Map<String, dynamic>?) &&
+            _hasTeacherName(candidateTeacher)) {
+          subject['teacher'] = candidateTeacher;
+        }
+        return subject;
       }
 
       final periodsToQuery = periodsRaw.isNotEmpty ? periodsRaw : (currentPeriod != null ? [currentPeriod] : <Map<String, dynamic>>[]);
@@ -1407,13 +1710,20 @@ class EduVulcanExtension extends OProvider {
               final teacher = _teacherToJson(g['Creator'] ?? g['Modifier']);
               final subject = ensureSubject(column['Subject'], teacher);
               final gradeList = subject['grades'] as List<Map<String, dynamic>>;
-              final weight = _double(column['Weight'], 0.0).round();
               final comment = _str(g['Comment']);
               final rawVal = _str(g['Content'] ?? g['ContentRaw']);
               final normVal = _normalizeGradeValue(rawVal);
-              final countsToAvg = column['CountToAverage'] == true ||
-                  column['CountsToAverage'] == true ||
-                  (g['Value'] != null && weight > 0);
+              final explicitNoAvg =
+                  column['CountToAverage'] == false || column['CountsToAverage'] == false;
+              final explicitAvg =
+                  column['CountToAverage'] == true || column['CountsToAverage'] == true;
+              final hasNumericGrade = g['Value'] != null || RegExp(r'^[1-6]').hasMatch(normVal);
+              final rawWeight = _double(column['Weight'], hasNumericGrade ? 1.0 : 0.0);
+              final countsToAvg = !explicitNoAvg && (explicitAvg || hasNumericGrade);
+              var weight = rawWeight > 0 && rawWeight < 1.0 ? 1 : rawWeight.round();
+              if (countsToAvg && weight <= 0) {
+                weight = 1;
+              }
               final gradeId = _int(g['Id']);
               final alreadyExists =
                   gradeId > 0 && gradeList.any((existing) => _int(existing['id']) == gradeId);
@@ -1466,6 +1776,7 @@ class EduVulcanExtension extends OProvider {
               final gradeList = subject['grades'] as List<Map<String, dynamic>>;
               final entry1 = _normalizeGradeValue(_str(s['Entry_1']).trim());
               final entry2 = _normalizeGradeValue(_str(s['Entry_2']).trim());
+              final entry3 = _normalizeGradeValue(_str(s['Entry_3']).trim());
               final isLastPeriod = s['Last'] == true || period['Last'] == true || pNum >= 2;
               final baseSummaryId = _int(s['Id'], 0) * 10;
               final modIso = _parseVulcanDate(s['ModifiedAt']).toIso8601String();
@@ -1514,6 +1825,51 @@ class EduVulcanExtension extends OProvider {
                   'isFinalProposition': false,
                 });
               }
+              if (entry3.isNotEmpty &&
+                  entry3 != entry2 &&
+                  !gradeList.any((existing) => _int(existing['id']) == baseSummaryId + 3)) {
+                gradeList.add({
+                  'id': baseSummaryId + 3,
+                  'url': '',
+                  'name': isLastPeriod ? 'Ocena roczna (poprawkowa)' : 'Ocena \u015br\u00f3droczna',
+                  'value': entry3,
+                  'weight': 0,
+                  'comments': <String>[],
+                  'countsToAverage': false,
+                  'date': modIso,
+                  'addDate': modIso,
+                  'resitPart': entry2.isNotEmpty,
+                  'semester': pNum,
+                  'isConstituent': false,
+                  'isSemester': !isLastPeriod,
+                  'isSemesterProposition': false,
+                  'isFinal': isLastPeriod,
+                  'isFinalProposition': false,
+                });
+              }
+            }
+          }
+        } catch (_) {}
+
+        try {
+          final avgEnv = await _hebeRequest(
+            method: 'GET',
+            restUrl: _restUrl!,
+            endpoint: 'mobile/grade/average/byPupil',
+            pupilId: pupilId,
+            query: {
+              'unitId': unitId.toString(),
+              'pupilId': pupilId.toString(),
+              'periodId': pId.toString(),
+              'lastId': '-2147483648',
+              'pageSize': '500',
+              'scope': 'auto',
+            },
+          );
+          if (avgEnv is List) {
+            for (final a in avgEnv) {
+              if (a is! Map) continue;
+              ensureSubject(a['Subject']);
             }
           }
         } catch (_) {}
@@ -1830,6 +2186,27 @@ class EduVulcanExtension extends OProvider {
         }
       } catch (_) {}
 
+      if (!_hasTeacherName(homeTeacherJson)) {
+        for (final sub in subjectsById.values) {
+          final subNameLower = _str(sub['name']).toLowerCase();
+          if (subNameLower.contains('wychowawc') ||
+              subNameLower.contains('edukacja wczesnoszkolna')) {
+            final subTeacher = sub['teacher'];
+            if (subTeacher is Map<String, dynamic> && _hasTeacherName(subTeacher)) {
+              homeTeacherJson = <String, dynamic>{
+                'id': _int(subTeacher['id']),
+                'url': _str(subTeacher['url']),
+                'firstName': _str(subTeacher['firstName']),
+                'lastName': _str(subTeacher['lastName']),
+                'isHomeTeacher': true,
+              };
+              mainClassLightJson['classTutor'] = homeTeacherJson;
+              break;
+            }
+          }
+        }
+      }
+
       final mainClassFullJson = <String, dynamic>{
         'id': mainClassLightJson['id'],
         'number': mainClassLightJson['number'],
@@ -1839,6 +2216,7 @@ class EduVulcanExtension extends OProvider {
         'endFirstSemester': mainClassLightJson['endFirstSemester'],
         'endSchoolYear': mainClassLightJson['endSchoolYear'],
         'unit': unitJson,
+        'classTutor': homeTeacherJson,
         'events': eventsJson,
         'averages': <String, dynamic>{},
       };
