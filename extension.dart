@@ -1,6 +1,6 @@
 // @id PROVGUID-RGLR-PROV-VULC-EDUVULCANAPI
 // @name eduVULCAN / UONET+
-// @version 1.2.2
+// @version 1.2.3
 // @lang pl
 // @author Ogaku
 // @icon https://eduvulcan.pl/Content/images/favicon/apple-touch-icon.png
@@ -389,7 +389,14 @@ class EduVulcanExtension extends OProvider {
     if (cleaned.isEmpty) {
       return const {'firstName': '', 'lastName': ''};
     }
-    final parts = cleaned.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    final rawParts = cleaned.replaceAll(RegExp(r'\s+'), ' ').split(' ');
+    final parts = <String>[];
+    for (final p in rawParts) {
+      if (p.isNotEmpty) parts.add(p);
+    }
+    if (parts.isEmpty) {
+      return const {'firstName': '', 'lastName': ''};
+    }
     if (parts.length == 1) {
       return {'firstName': '', 'lastName': parts.first};
     }
@@ -399,10 +406,21 @@ class EduVulcanExtension extends OProvider {
     };
   }
 
-  bool _hasTeacherName(Map<String, dynamic>? teacher) {
-    if (teacher == null) return false;
+  bool _hasTeacherName(dynamic teacher) {
+    if (teacher is! Map) return false;
     return _str(teacher['firstName']).trim().isNotEmpty ||
         _str(teacher['lastName']).trim().isNotEmpty;
+  }
+
+  int _stablePositiveId(dynamic rawId, String seed) {
+    final parsed = _int(rawId);
+    if (parsed > 0) return parsed;
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < seed.length; i++) {
+      hash ^= seed.codeUnitAt(i);
+      hash = (hash * 0x01000193) & 0x7fffffff;
+    }
+    return hash > 0 ? hash : 1;
   }
 
   Map<String, dynamic> _teacherToJson(dynamic raw, {bool? isHomeTeacher}) {
@@ -1676,12 +1694,16 @@ class EduVulcanExtension extends OProvider {
             'grades': <Map<String, dynamic>>[],
           },
         );
-        if (!_hasTeacherName(subject['teacher'] as Map<String, dynamic>?) &&
+        if (!_hasTeacherName(subject['teacher']) &&
             _hasTeacherName(candidateTeacher)) {
           subject['teacher'] = candidateTeacher;
         }
         return subject;
       }
+
+      var gradesSucceeded = false;
+      var attendanceSucceeded = false;
+      Object? coreFetchError;
 
       final periodsToQuery = periodsRaw.isNotEmpty ? periodsRaw : (currentPeriod != null ? [currentPeriod] : <Map<String, dynamic>>[]);
       for (final period in periodsToQuery) {
@@ -1704,6 +1726,7 @@ class EduVulcanExtension extends OProvider {
             },
           );
           if (gradesEnv is List) {
+            gradesSucceeded = true;
             for (final g in gradesEnv) {
               if (g is! Map) continue;
               final column = Map<String, dynamic>.from((g['Column'] as Map?) ?? {});
@@ -1724,11 +1747,15 @@ class EduVulcanExtension extends OProvider {
               if (countsToAvg && weight <= 0) {
                 weight = 1;
               }
-              final gradeId = _int(g['Id']);
+              final colName = _str(column['Name']);
+              final createdIso = _parseVulcanDate(g['CreatedAt'] ?? g['DateCreated']).toIso8601String();
+              final gradeId = _stablePositiveId(
+                g['Id'],
+                '${subject['id']}:$pNum:$colName:$normVal:$createdIso',
+              );
               final alreadyExists =
                   gradeId > 0 && gradeList.any((existing) => _int(existing['id']) == gradeId);
               if (!alreadyExists) {
-                final colName = _str(column['Name']);
                 gradeList.add({
                   'id': gradeId,
                   'url': '',
@@ -1737,7 +1764,7 @@ class EduVulcanExtension extends OProvider {
                   'weight': weight,
                   'comments': comment.isNotEmpty ? [comment] : <String>[],
                   'countsToAverage': countsToAvg,
-                  'date': _parseVulcanDate(g['CreatedAt'] ?? g['DateCreated']).toIso8601String(),
+                  'date': createdIso,
                   'addDate': _parseVulcanDate(
                     g['ModifiedAt'] ?? g['DateModify'] ?? g['CreatedAt'] ?? g['DateCreated'],
                   ).toIso8601String(),
@@ -1753,7 +1780,9 @@ class EduVulcanExtension extends OProvider {
               }
             }
           }
-        } catch (_) {}
+        } catch (ex) {
+          coreFetchError ??= ex;
+        }
 
         try {
           final sumEnv = await _hebeRequest(
@@ -2020,6 +2049,7 @@ class EduVulcanExtension extends OProvider {
           },
         );
         if (attEnv is List) {
+          attendanceSucceeded = true;
           for (final a in attEnv) {
             if (a is! Map) continue;
             final presence = a['PresenceType'] as Map?;
@@ -2053,9 +2083,13 @@ class EduVulcanExtension extends OProvider {
             final lessonNo = _int(a['LessonNumber'], 1);
             final teacherJson = _teacherToJson(a['TeacherPrimary']);
             final subjectJson = ensureSubject(a['Subject'], teacherJson);
+            final attId = _stablePositiveId(
+              a['Id'] ?? a['LessonId'],
+              '$dayIso:$lessonNo:$attType:${subjectJson['id']}',
+            );
 
             attendancesJson.add({
-              'id': _int(a['Id']),
+              'id': attId,
               'lessonNo': lessonNo,
               'date': dayIso,
               'addDate': addDate.toIso8601String(),
@@ -2073,7 +2107,9 @@ class EduVulcanExtension extends OProvider {
             });
           }
         }
-      } catch (_) {}
+      } catch (ex) {
+        coreFetchError ??= ex;
+      }
 
       final eventsDateFrom = _ymd(beginSchoolYear);
       final eventsDateTo = _ymd(endSchoolYear.add(const Duration(days: 14)));
@@ -2192,7 +2228,7 @@ class EduVulcanExtension extends OProvider {
           if (subNameLower.contains('wychowawc') ||
               subNameLower.contains('edukacja wczesnoszkolna')) {
             final subTeacher = sub['teacher'];
-            if (subTeacher is Map<String, dynamic> && _hasTeacherName(subTeacher)) {
+            if (subTeacher is Map && _hasTeacherName(subTeacher)) {
               homeTeacherJson = <String, dynamic>{
                 'id': _int(subTeacher['id']),
                 'url': _str(subTeacher['url']),
@@ -2236,6 +2272,26 @@ class EduVulcanExtension extends OProvider {
           _intOrNull(pupilRaw['PupilNumber']) ??
           1;
 
+      if (!gradesSucceeded && !attendanceSucceeded && coreFetchError != null) {
+        return {'success': false, 'message': _errStr(coreFetchError)};
+      }
+
+      final prevStudent = _registerData['student'];
+      var finalSubjects = subjectsById.values.toList();
+      if (!gradesSucceeded && prevStudent is Map && prevStudent['subjects'] is List) {
+        finalSubjects = (prevStudent['subjects'] as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      }
+      var finalAttendances = attendancesJson;
+      if (!attendanceSucceeded && prevStudent is Map && prevStudent['attendances'] is List) {
+        finalAttendances = (prevStudent['attendances'] as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      }
+
       final studentJson = <String, dynamic>{
         'account': {
           'id': pupilId,
@@ -2245,8 +2301,8 @@ class EduVulcanExtension extends OProvider {
           'lastName': lastName,
         },
         'mainClass': mainClassFullJson,
-        'subjects': subjectsById.values.toList(),
-        'attendances': attendancesJson,
+        'subjects': finalSubjects,
+        'attendances': finalAttendances,
       };
 
       final timetablesJson = <String, dynamic>{
